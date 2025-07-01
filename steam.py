@@ -57,7 +57,9 @@ def load_regression_data():
     return reg_df
 
 def get_steam_meter_columns(df):
-    return [col for col in df.columns if col not in EXCLUDE_COLS and pd.api.types.is_numeric_dtype(df[col])]
+    additional_excludes = ["HDD 15.5", "HDD15.5", "HDD", "10T Steam"]
+    all_excludes = EXCLUDE_COLS + additional_excludes
+    return [col for col in df.columns if col not in all_excludes and pd.api.types.is_numeric_dtype(df[col])]
 
 def calculate_advanced_metrics(df, meter_cols):
     """Calculate advanced performance metrics"""
@@ -210,7 +212,7 @@ def apply_filters(df, date_range=None, selected_years=None, selected_months=None
         selected_meter_cols = [col for col in selected_meters if col in available_meters]
         
         # Keep essential columns plus selected meters
-        essential_cols = ["Year", "Month", "Week", "Day", "Time", "Date", "HDD 15.5", "10T Steam"]
+        essential_cols = ["Year", "Month", "Week", "Day", "Time", "Date"]
         cols_to_keep = []
         
         # Add essential columns that exist
@@ -220,6 +222,10 @@ def apply_filters(df, date_range=None, selected_years=None, selected_months=None
         
         # Add selected meter columns
         cols_to_keep.extend(selected_meter_cols)
+        
+        # Always keep HDD 15.5 for regression analysis (but not for plotting)
+        if "HDD 15.5" in filtered.columns:
+            cols_to_keep.append("HDD 15.5")
         
         # Only filter columns if we have valid selections
         if selected_meter_cols:
@@ -292,7 +298,14 @@ def main():
     df = load_data()
     filtered, selected_meters, selected_years, selected_months, date_range = filter_by_sidebar(df)
     steam_meter_columns = get_steam_meter_columns(filtered)
-    metric_cols = [col for col in steam_meter_columns if col not in ["HDD 15.5", "10T Steam"]]
+    
+    # If specific meters are selected, use only those; otherwise use all available steam meters
+    if selected_meters and "All" not in selected_meters:
+        # Only include meters that are actually in the filtered data and were selected
+        metric_cols = [col for col in selected_meters if col in steam_meter_columns]
+    else:
+        # Use all available steam meter columns (excluding HDD and 10T Steam)
+        metric_cols = steam_meter_columns
 
     # ========== SECTION 1: KEY PERFORMANCE INDICATORS ==========
     st.markdown('<div class="section-header">Key Performance Indicators</div>', unsafe_allow_html=True)
@@ -400,14 +413,17 @@ def main():
             
             fig = go.Figure()
             
-            for meter in steam_meter_columns:
+            # Use metric_cols instead of steam_meter_columns to respect filtering
+            meters_to_plot = metric_cols if metric_cols else steam_meter_columns
+            
+            for meter in meters_to_plot:
                 if meter in filtered_ts.columns:
                     if chart_type == "Area":
                         fig.add_trace(go.Scatter(
                             x=filtered_ts[x_col],
                             y=filtered_ts[meter],
                             mode='lines',
-                            fill='tonexty' if meter != steam_meter_columns[0] else 'tozeroy',
+                            fill='tonexty' if meter != meters_to_plot[0] else 'tozeroy',
                             name=meter,
                             stackgroup='one'
                         ))
