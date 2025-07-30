@@ -1,14 +1,14 @@
-import pandas as pd
+import pandas as pd  
 import streamlit as st
 import os
 import plotly.graph_objects as go
 import plotly.express as px
 import statsmodels.api as sm
 import numpy as np
+from clean import clean_and_update_steam_data
 
 st.set_page_config(page_title="Steam Dashboard", layout="wide", initial_sidebar_state="expanded")
 
-# Custom CSS for better styling
 st.markdown("""
 <style>
     .main-header {
@@ -20,7 +20,7 @@ st.markdown("""
     }
     .section-header {
         font-size: 1.5rem;
-        font-weight: bold;
+        font-weight: bold; 
         color: #54565B;
         margin: 1rem 0;
         border-bottom: 2px solid #C5203F;
@@ -45,19 +45,24 @@ EXCLUDE_COLS = ["Year", "Month", "Week", "Day", "Time", "Date"]
 def load_data():
     file_path = os.path.join(csv_dir, CSV_FILE)
     df = pd.read_csv(file_path)
+    # Robust date parsing for dashboard compatibility
+    if 'Date' in df.columns:
+        df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True, errors='coerce')
     return df.drop_duplicates()
 
 @st.cache_data
 def load_regression_data():
     reg_path = os.path.join(csv_dir, "sum_steam.csv")
     reg_df = pd.read_csv(reg_path)
-    reg_df["Date"] = pd.to_datetime(reg_df["Date"])
+    # Robust date parsing for dashboard compatibility
+    if 'Date' in reg_df.columns:
+        reg_df['Date'] = pd.to_datetime(reg_df['Date'], format='mixed', dayfirst=True, errors='coerce')
     reg_df["Year"] = reg_df["Date"].dt.year.astype(str)
     reg_df["Month"] = reg_df["Date"].dt.strftime("%b")
     return reg_df
 
 def get_steam_meter_columns(df):
-    additional_excludes = ["HDD 15.5", "HDD15.5", "HDD", "10T Steam"]
+    additional_excludes = ["HDD 15.5", "HDD15.5", "HDD", "10T Steam", "8T Steam"]
     all_excludes = EXCLUDE_COLS + additional_excludes
     return [col for col in df.columns if col not in all_excludes and pd.api.types.is_numeric_dtype(df[col])]
 
@@ -116,7 +121,6 @@ def create_heatmap_calendar(df, meter_cols):
     if df.empty or not meter_cols:
         return None
     
-    # Aggregate daily usage
     df_daily = df.copy()
     df_daily['Date'] = pd.to_datetime(df_daily['Date'])
     df_daily['DayOfWeek'] = df_daily['Date'].dt.day_name()
@@ -125,7 +129,6 @@ def create_heatmap_calendar(df, meter_cols):
     daily_usage = df_daily.groupby(['Date', 'DayOfWeek', 'Week'])[meter_cols].sum().sum(axis=1).reset_index()
     daily_usage.columns = ['Date', 'DayOfWeek', 'Week', 'TotalUsage']
     
-    # Create pivot table for heatmap
     pivot_data = daily_usage.pivot_table(
         values='TotalUsage', 
         index='DayOfWeek', 
@@ -294,9 +297,33 @@ def filter_by_sidebar(df):
     
     return filtered, selected_meters, selected_years, selected_months, date_range
 
+# File uploaders and cleaning button
+st.sidebar.markdown('### Upload New Data Files')
+steam_file = st.sidebar.file_uploader('Upload Steam Meter CSV', type='csv', key='steam_csv')
+hdd_file = st.sidebar.file_uploader('Upload HDD CSV', type='csv', key='hdd_csv')
+
+if st.sidebar.button('Clean and Update Data'):
+    if steam_file and hdd_file:
+        # Save uploaded files to csvs/
+        steam_path = os.path.join(csv_dir, 'uploaded_steam.csv')
+        hdd_path = os.path.join(csv_dir, 'uploaded_hdd.csv')
+        with open(steam_path, 'wb') as f:
+            f.write(steam_file.getbuffer())
+        with open(hdd_path, 'wb') as f:
+            f.write(hdd_file.getbuffer())
+        # Rename files to match expected names for cleaning
+        os.replace(steam_path, os.path.join(csv_dir, 'Steam_File.csv'))
+        os.replace(hdd_path, os.path.join(csv_dir, 'HDD_File.csv'))
+        # Run cleaning
+        clean_and_update_steam_data(csv_dir)
+        st.sidebar.success('Data cleaned and updated! Refresh dashboard to see new data.')
+    else:
+        st.sidebar.error('Please upload both Steam and HDD CSV files.')
+
 def main():
     df = load_data()
     filtered, selected_meters, selected_years, selected_months, date_range = filter_by_sidebar(df)
+    
     steam_meter_columns = get_steam_meter_columns(filtered)
     
     # If specific meters are selected, use only those; otherwise use all available steam meters
@@ -319,25 +346,35 @@ def main():
         for col in metric_cols:
             filtered[col] = pd.to_numeric(filtered[col], errors='coerce')
         
+        # Fallback logic for 10T Steam: use 8T Steam if 10T is 0 or NaN
+        if "10T Steam" in filtered.columns:
+            filtered["10T Steam"] = pd.to_numeric(filtered["10T Steam"], errors="coerce")
+            if "8T Steam" in filtered.columns:
+                filtered["10T_or_8T_Steam"] = filtered["10T Steam"].where(
+                    (filtered["10T Steam"].notna()) & (filtered["10T Steam"] != 0),
+                    filtered["8T Steam"]
+                )
+            else:
+                filtered["10T_or_8T_Steam"] = filtered["10T Steam"]
+        elif "8T Steam" in filtered.columns:
+            filtered["10T_or_8T_Steam"] = pd.to_numeric(filtered["8T Steam"], errors="coerce")
+        else:
+            filtered["10T_or_8T_Steam"] = np.nan
+
         meter_totals = filtered[metric_cols].sum(numeric_only=True)
         highest_steam = meter_totals.max()
         highest_steam_type = meter_totals.idxmax()
         average_steam = meter_totals.mean().round(1)
         totalSteamFlow = meter_totals.sum()
-        
-        # Handle 10T Steam separately
-        if "10T Steam" in filtered.columns:
-            filtered["10T Steam"] = pd.to_numeric(filtered["10T Steam"], errors="coerce")
-            main_steam = filtered["10T Steam"].sum()
-            if main_steam > 0:
-                loss_percentage = (100 - ((totalSteamFlow / main_steam) * 100))
-                totalIncomingVsMain = f"{loss_percentage:.1f}%"
-            else:
-                totalIncomingVsMain = "N/A"
+
+        # Use 10T_or_8T_Steam for main_steam and loss calculations
+        main_steam = filtered["10T_or_8T_Steam"].sum()
+        if main_steam > 0:
+            loss_percentage = (100 - ((totalSteamFlow / main_steam) * 100))
+            totalIncomingVsMain = f"{loss_percentage:.1f}%"
         else:
-            main_steam = "N/A"
             totalIncomingVsMain = "N/A"
-        
+
         # Advanced metrics
         advanced_metrics = calculate_advanced_metrics(filtered, metric_cols)
 
@@ -373,11 +410,12 @@ def main():
         )
     with col6:
         st.metric(
-            "10T Steam Total (Kg)", 
+            "10T/8T Steam Total (Kg)",
             f"{main_steam:,.0f}" if isinstance(main_steam, (int, float)) else main_steam,
             border=True
         )
-    # ========== SECTION 2: TIME SERIES ANALYSIS ==========
+
+    # ========== SECTION 2: TIME SERIES ANALYSIS ========== 
     st.markdown('<div class="section-header">Time Series Analysis</div>', unsafe_allow_html=True)
     
     col_ts1, col_ts2 = st.columns([3, 1])
@@ -458,6 +496,126 @@ def main():
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.warning("No data available for the selected filters.")
+
+    col7, col8, col9 = st.columns(3)
+    col10, col11, col12, col13 = st.columns(4)
+    # Prepare for advanced metrics
+    daytime_total = nighttime_total = 0
+    day_vs_night_change = "N/A"
+    delta_color_day_night = "off"
+    spike_intervals_list, inactive_periods_list = [], []
+    weekday_total = weekend_total = 0
+    weekday_vs_weekend_change = "N/A"
+    delta_color_weekday_weekend = "off"
+    current_week_change = "N/A"
+    delta = None
+    delta_color = "off"
+    safe_steam_meter_columns = []
+
+    filtered_data = filtered.copy()
+    combined_data = filtered.copy()  # For now, use filtered as combined
+
+    if not filtered_data.empty:
+        # Use filtered_data for all calculations
+        steam_meter_columns_adv = [col for col in filtered_data.columns if col not in ["Year", "Month", "Week", "Day", "Time", "Date", "DateTime"] and pd.api.types.is_numeric_dtype(filtered_data[col])]
+        for col in steam_meter_columns_adv:
+            filtered_data[col] = pd.to_numeric(filtered_data[col], errors='coerce')
+
+        # --- Day vs Night Calculation ---
+        if "DateTime" in filtered_data.columns:
+            filtered_data["Hour"] = filtered_data["DateTime"].dt.hour
+            daytime = filtered_data[(filtered_data["Hour"] >= 6) & (filtered_data["Hour"] < 18)]
+            nighttime = filtered_data[(filtered_data["Hour"] < 6) | (filtered_data["Hour"] >= 18)]
+        elif "Time" in filtered_data.columns:
+            filtered_data["Hour"] = pd.to_datetime(filtered_data["Time"], errors="coerce").dt.hour
+            daytime = filtered_data[(filtered_data["Hour"] >= 6) & (filtered_data["Hour"] < 18)]
+            nighttime = filtered_data[(filtered_data["Hour"] < 6) | (filtered_data["Hour"] >= 18)]
+        else:
+            daytime = nighttime = pd.DataFrame()
+
+        filtered_data.drop(columns=["Hour"], inplace=True, errors='ignore')
+
+        daytime_total = daytime[steam_meter_columns_adv].sum().sum() if not daytime.empty else 0
+        nighttime_total = nighttime[steam_meter_columns_adv].sum().sum() if not nighttime.empty else 0
+
+        if (nighttime_total + daytime_total) > 0:
+            day_vs_night_change = round(((daytime_total - nighttime_total) / (nighttime_total + daytime_total)) * 100, 1)
+            delta_color_day_night = "normal" if day_vs_night_change >= 0 else "inverse"
+        else:
+            day_vs_night_change = "N/A"
+            delta_color_day_night = "off"
+
+        # --- Weekday vs Weekend Change ---
+        if "Day" in combined_data.columns:
+            weekday_data = combined_data[combined_data["Day"].isin(["Mon", "Tue", "Wed", "Thu", "Fri"])]
+            weekend_data = combined_data[combined_data["Day"].isin(["Sat", "Sun"])]
+            safe_steam_meter_columns = [col for col in steam_meter_columns_adv if col in weekday_data.columns]
+            weekday_total = weekday_data[safe_steam_meter_columns].sum().sum() if not weekday_data.empty else 0
+            weekend_total = weekend_data[safe_steam_meter_columns].sum().sum() if not weekend_data.empty else 0
+            if weekend_total > 0:
+                weekday_vs_weekend_change = round(((weekday_total - weekend_total) / weekend_total) * 100, 1)
+                delta_color_weekday_weekend = "normal" if weekday_vs_weekend_change >= 0 else "inverse"
+            else:
+                weekday_vs_weekend_change = "N/A"
+                delta_color_weekday_weekend = "off"
+
+        # --- Week over week ---
+        if not filtered_data.empty and "Week" in filtered_data.columns and "Year" in filtered_data.columns:
+            # Get current and previous week numbers
+            current_weeks = filtered_data["Week"].unique()
+            if len(current_weeks) > 0:
+                current_week = max(current_weeks)
+                current_week_data = filtered_data[filtered_data["Week"] == current_week]
+                previous_week = current_week - 1
+                previous_week_data = filtered_data[filtered_data["Week"] == previous_week]
+                current_week_total = current_week_data[steam_meter_columns_adv].sum().sum() if not current_week_data.empty else 0
+                previous_week_total = previous_week_data[steam_meter_columns_adv].sum().sum() if not previous_week_data.empty else 0
+                if previous_week_total > 0:
+                    current_week_change = round(((current_week_total - previous_week_total) / previous_week_total) * 100, 1)
+                    delta_color = "normal" if current_week_change >= 0 else "inverse"
+                    delta = current_week_change
+
+    with col7:
+        st.metric(
+            label="Day vs Night Change (%)",
+            value="",
+            delta=f"{day_vs_night_change}%" if day_vs_night_change != "N/A" else "None",
+            delta_color=delta_color_day_night,
+            label_visibility="visible",
+            border=True
+        )
+    with col8:
+        st.metric(
+            label="Weekday vs Weekend Change (%)",
+            value="",
+            delta=f"{weekday_vs_weekend_change}%" if weekday_vs_weekend_change != "N/A" else "None",
+            delta_color=delta_color_weekday_weekend,
+            label_visibility="visible",
+            border=True
+        )
+    with col9:
+        st.metric(
+            label="Week Over Week Change (%)",
+            value="",
+            delta=f"{delta}%" if delta is not None else "None",  
+            delta_color= delta_color if delta is not None else "off",  
+            label_visibility="visible",
+            border=True
+        )
+    with col12:
+        with st.expander("Day vs Night Steam Usage"):
+            st.write(f"Daytime Total: {daytime_total:,.0f} Kg")
+            st.write(f"Nighttime Total: {nighttime_total:,.0f} Kg")
+    with col13:
+        with st.expander("Weekday vs Weekend Steam Usage"):
+            st.write(f"Weekday Total: {weekday_total:,.0f} Kg")
+            st.write(f"Weekend Total: {weekend_total:,.0f} Kg")
+    with col11:
+        with st.expander("Inactive Periods"):
+            st.write("No inactive periods detected.")
+    with col10:
+        with st.expander("Spike Time Intervals"):
+            st.write("No spike time intervals detected.")
 
     # ========== SECTION 3: ADVANCED ANALYTICS ==========
     st.markdown('<div class="section-header">Advanced Analytics</div>', unsafe_allow_html=True)
@@ -555,8 +713,25 @@ def main():
     if "All" not in selected_months:
         filtered_reg_df = filtered_reg_df[filtered_reg_df["Month"].isin(selected_months)]
     
+    # Add fallback for regression meters as well
+    if "10T Steam" in filtered_reg_df.columns:
+        filtered_reg_df["10T Steam"] = pd.to_numeric(filtered_reg_df["10T Steam"], errors="coerce")
+        if "8T Steam" in filtered_reg_df.columns:
+            filtered_reg_df["10T_or_8T_Steam"] = filtered_reg_df["10T Steam"].where(
+                (filtered_reg_df["10T Steam"].notna()) & (filtered_reg_df["10T Steam"] != 0),
+                filtered_reg_df["8T Steam"]
+            )
+        else:
+            filtered_reg_df["10T_or_8T_Steam"] = filtered_reg_df["10T Steam"]
+    elif "8T Steam" in filtered_reg_df.columns:
+        filtered_reg_df["10T_or_8T_Steam"] = pd.to_numeric(filtered_reg_df["8T Steam"], errors="coerce")
+    else:
+        filtered_reg_df["10T_or_8T_Steam"] = np.nan
+
     regression_meters = [col for col in metric_cols if col in filtered_reg_df.columns]
-    
+    if "10T_or_8T_Steam" in filtered_reg_df.columns and "10T Steam" in regression_meters:
+        regression_meters = [col if col != "10T Steam" else "10T_or_8T_Steam" for col in regression_meters]
+
     if regression_meters and "HDD 15.5" in filtered_reg_df.columns:
         col_reg1, col_reg2 = st.columns([3, 1])
         
