@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import statsmodels.api as sm
 import numpy as np
-from clean import clean_and_update_steam_data
+#from clean import clean_and_update_steam_data
 
 st.set_page_config(page_title="Steam Dashboard", layout="wide", initial_sidebar_state="expanded")
 
@@ -315,7 +315,7 @@ if st.sidebar.button('Clean and Update Data'):
         os.replace(steam_path, os.path.join(csv_dir, 'Steam_File.csv'))
         os.replace(hdd_path, os.path.join(csv_dir, 'HDD_File.csv'))
         # Run cleaning
-        clean_and_update_steam_data(csv_dir)
+        #clean_and_update_steam_data(csv_dir)
         st.sidebar.success('Data cleaned and updated! Refresh dashboard to see new data.')
     else:
         st.sidebar.error('Please upload both Steam and HDD CSV files.')
