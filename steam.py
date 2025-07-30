@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import statsmodels.api as sm
 import numpy as np
-#from clean import clean_and_update_steam_data
+# from clean import clean_and_update_steam_data
 
 st.set_page_config(page_title="Steam Dashboard", layout="wide", initial_sidebar_state="expanded")
 
@@ -45,7 +45,6 @@ EXCLUDE_COLS = ["Year", "Month", "Week", "Day", "Time", "Date"]
 def load_data():
     file_path = os.path.join(csv_dir, CSV_FILE)
     df = pd.read_csv(file_path)
-    # Robust date parsing for dashboard compatibility
     if 'Date' in df.columns:
         df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True, errors='coerce')
     return df.drop_duplicates()
@@ -54,7 +53,6 @@ def load_data():
 def load_regression_data():
     reg_path = os.path.join(csv_dir, "sum_steam.csv")
     reg_df = pd.read_csv(reg_path)
-    # Robust date parsing for dashboard compatibility
     if 'Date' in reg_df.columns:
         reg_df['Date'] = pd.to_datetime(reg_df['Date'], format='mixed', dayfirst=True, errors='coerce')
     reg_df["Year"] = reg_df["Date"].dt.year.astype(str)
@@ -65,6 +63,29 @@ def get_steam_meter_columns(df):
     additional_excludes = ["HDD 15.5", "HDD15.5", "HDD", "10T Steam", "8T Steam"]
     all_excludes = EXCLUDE_COLS + additional_excludes
     return [col for col in df.columns if col not in all_excludes and pd.api.types.is_numeric_dtype(df[col])]
+
+
+def calculate_spikes(df, meter_cols):
+    # Use DateTime if available, else fallback to Date+Time or just Time
+    if not meter_cols or df.empty:
+        return [], []
+    df = df.copy()
+    if "DateTime" in df.columns:
+        time_col = "DateTime"
+    elif "Date" in df.columns and "Time" in df.columns:
+        df["DateTime"] = pd.to_datetime(df["Date"].astype(str) + " " + df["Time"].astype(str), errors="coerce")
+        time_col = "DateTime"
+    elif "Time" in df.columns:
+        time_col = "Time"
+    else:
+        time_col = df.columns[0] 
+
+    # Calculate total usage per row
+    time_totals = df[meter_cols].sum(axis=1, numeric_only=True)
+    spike_threshold = time_totals.quantile(0.99)
+    spikes = df.loc[time_totals > spike_threshold, time_col].dropna().tolist()
+    inactive = df.loc[time_totals == 0, time_col].dropna().tolist()
+    return spikes, inactive
 
 def calculate_advanced_metrics(df, meter_cols):
     """Calculate advanced performance metrics"""
@@ -154,7 +175,6 @@ def create_box_plot_analysis(df, meter_cols):
     if df.empty or not meter_cols:
         return None
     
-    # Melt the data for box plot
     df_melted = df[meter_cols + ['Month']].melt(
         id_vars=['Month'],
         value_vars=meter_cols,
@@ -326,12 +346,9 @@ def main():
     
     steam_meter_columns = get_steam_meter_columns(filtered)
     
-    # If specific meters are selected, use only those; otherwise use all available steam meters
     if selected_meters and "All" not in selected_meters:
-        # Only include meters that are actually in the filtered data and were selected
         metric_cols = [col for col in selected_meters if col in steam_meter_columns]
     else:
-        # Use all available steam meter columns (excluding HDD and 10T Steam)
         metric_cols = steam_meter_columns
 
     # ========== SECTION 1: KEY PERFORMANCE INDICATORS ==========
@@ -499,6 +516,7 @@ def main():
 
     col7, col8, col9 = st.columns(3)
     col10, col11, col12, col13 = st.columns(4)
+
     # Prepare for advanced metrics
     daytime_total = nighttime_total = 0
     day_vs_night_change = "N/A"
@@ -513,13 +531,15 @@ def main():
     safe_steam_meter_columns = []
 
     filtered_data = filtered.copy()
-    combined_data = filtered.copy()  # For now, use filtered as combined
+    combined_data = filtered.copy()
 
     if not filtered_data.empty:
-        # Use filtered_data for all calculations
         steam_meter_columns_adv = [col for col in filtered_data.columns if col not in ["Year", "Month", "Week", "Day", "Time", "Date", "DateTime"] and pd.api.types.is_numeric_dtype(filtered_data[col])]
         for col in steam_meter_columns_adv:
             filtered_data[col] = pd.to_numeric(filtered_data[col], errors='coerce')
+
+        # Calculate spikes and inactive periods
+        spike_intervals_list, inactive_periods_list = calculate_spikes(filtered_data, steam_meter_columns_adv)
 
         # --- Day vs Night Calculation ---
         if "DateTime" in filtered_data.columns:
@@ -612,10 +632,18 @@ def main():
             st.write(f"Weekend Total: {weekend_total:,.0f} Kg")
     with col11:
         with st.expander("Inactive Periods"):
-            st.write("No inactive periods detected.")
+            if inactive_periods_list:
+                for interval in inactive_periods_list:
+                    st.write(f"Inactive at: {interval}")
+            else:
+                st.write("No inactive periods detected.")
     with col10:
         with st.expander("Spike Time Intervals"):
-            st.write("No spike time intervals detected.")
+            if spike_intervals_list:
+                for interval in spike_intervals_list:
+                    st.write(f"Spike at: {interval}")
+            else:
+                st.write("No spike time intervals detected.")
 
     # ========== SECTION 3: ADVANCED ANALYTICS ==========
     st.markdown('<div class="section-header">Advanced Analytics</div>', unsafe_allow_html=True)
